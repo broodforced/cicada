@@ -1,160 +1,300 @@
+#!/usr/bin/env python3
+## cicada.py — bug bounty hunting machine
+
 import argparse
-from urllib.parse import urlparse
-from core import scanner, intruder, decoder, analyzer, collaborator, crawler, proxy, utils
+import sys
+import os
+import json
 
-def determine_mode_label(args):
-	if args.deep:
-		return "[Deep]"
-	elif args.fast:
-		return "[Fast]"
-	elif args.normal:
-		return "[Normal]"
-	elif any([args.scan, args.fuzz, args.decodeall, args.proxy, args.crawl, args.collab]):
-		return "[Custom]"
-	else:
-		return "[Custom]"
+from core.config import Config
+from core.pipeline import Pipeline
+from decoder import codec
+from decoder.log_analyzer import LogAnalyzer
+from report.h1_template import H1Template
+from shared.schema import ScanResult
 
-def extract_log_basename(url):
-	parsed = urlparse(url)
-	domain = parsed.netloc or parsed.path
-	domain = domain.split(":")[0]
-	return domain.split(".")[0]
 
-def r_scanner(target):
-	output = scanner.run_nuclei(target)
-	print(output)
-	utils.log_output(target, "nuclei", output)
+VERSION = "0.1.0"
 
-def r_fuzzer(target, wordlist):
-	output = intruder.run_ffuf(target, wordlist)
-	print(output)
-	utils.log_output(target, "fuff", output)
+BANNER = r"""
+           88                                88             
+           ""                                88             
+                                             88             
+ ,adPPYba, 88  ,adPPYba, ,adPPYYba,  ,adPPYb,88 ,adPPYYba,  
+a8"     "" 88 a8"     "" ""     `Y8 a8"    `Y88 ""     `Y8  
+8b         88 8b         ,adPPPPP88 8b       88 ,adPPPPP88  
+"8a,   ,aa 88 "8a,   ,aa 88,    ,88 "8a,   ,d88 88,    ,88  
+ `"Ybbd8"' 88  `"Ybbd8"' `"8bbdP"Y8  `"8bbdP"Y8 `"8bbdP"Y8
+                     ,
+                `-.   \    .-'
+        ,-"`````""-\__ |  /
+         '-.._    _.-'` '-o,
+             _>--:{{<   ) |)    )    )    )
+         .-''      '-.__.-o`
+        '-._____..-/`  |  \
+                ,-'   /    `-.
+                      `
+"""
 
-def r_proxy():
-	from core import proxy
-	proxy.run_proxy()
+def banner(mode=""):
+	print(BANNER)
+	print(f"  cicada v{VERSION} | {mode}")
+	print()
 
-def r_crawler(target):
-	from core import crawler
-	crawler.crawl_target(target)
 
-def r_collaborator(target):
-	from core import collaborator
-	collaborator.poll_collaborator(target)
+def cmd_scan(args):
+	mode = "deep" if args.deep else "fast" if args.fast else "normal"
+	banner(mode)
 
-def r_decoders(args):	
-	if args.b64encode:
-		print(decoder.base64_encode(args.b64encode))
-	if args.b64decode:
-		print(decoder.base64_decode(args.b64decode))
-	if args.urlencode:
-		print(decoder.url_encode(args.urlencode))
-	if args.urldecode:
-		print(decoder.url_decode(args.urldecode))
+	missing, status = Config.check_ready()
+	if missing:
+		print(f"  [!] missing required tools: {', '.join(missing)}")
+		print(f"  [!] install with:")
+		for name in missing:
+			print(f"      {status[name]['install']}")
+		sys.exit(1)
 
-def r_logdecoders(args):
-	if args.decodeall:
-		logfile = args.decodeall if isinstance(args.decodeall, str) else None
-		if not logfile and args.target:
-			logfile = f"{extract_log_basename(args.target)}.log"
-		if logfile:
-			analyzer.analyze(logfile)
-		else:
-			print("[-] Please provide a log file with --decodeall or use it with a target.")
-
-def parse_args():
-	class CustomParser(argparse.ArgumentParser):
-		def print_help(self):
-			utils.banner("[Help]")
-			super().print_help()
-
-	parser = CustomParser(
-		description = "", 
-		usage=argparse.SUPPRESS,
-		formatter_class=argparse.RawDescriptionHelpFormatter
+	config = Config(
+		target=args.target,
+		mode=mode,
+		wordlist=args.wordlist or "",
+		threads=args.threads,
+		output_dir=args.output or os.getcwd(),
+		nuclei_templates=args.templates or "",
+		nuclei_severity=args.severity or "",
+		tymbal_input=args.tymbal or "",
+		verbose=args.verbose,
 	)
 
-	parser.add_argument("target", help="Target URL/IP", nargs="?")
-	parser.add_argument("-s", "--scan", action="store_true", help="Run vulnerability scanner")
-	parser.add_argument("-z", "--fuzz", action="store_true", help="Run FFUF fuzzing")
-	parser.add_argument("-w", "--wordlist", help="Path to wordlist file (e.g., SecLists/.../common.txt)")
-	parser.add_argument("-p", "--proxy", action="store_true", help="Run proxy MITM")
-	parser.add_argument("-r", "--crawl", action="store_true", help="Run crawler")
-	parser.add_argument("-c", "--collab", action="store_true", help="Poll interactsh collaborator")	
-	parser.add_argument("-b", "--b64encode", help="Base64 encode string")
-	parser.add_argument("-x", "--b64decode", help="Base64 decode string")
-	parser.add_argument("-e", "--urlencode", help="URL encode string")
-	parser.add_argument("-u", "--urldecode", help="URL decode string")
-	parser.add_argument("-a", "--decodeall", nargs="?", const=True, help="Decode encoded content from log (optional: provide filename)")
-	
-	parser.add_argument("-d", "--deep", action="store_true", help="Deep mode (all tools)")	
-	parser.add_argument("-n", "--normal", action="store_true", help="Normal mode (default subset without arguments)")
-	parser.add_argument("-f", "--fast", action="store_true", help="Fast mode (quick scan)")
+	if args.scope:
+		config.scope = load_scope(args.scope)
 
-	return parser.parse_args()
+	pipe = Pipeline(config)
+	result = pipe.run()
+
+	print(f"\n  {'─' * 40}")
+	print(f"  {result['summary']}")
+	print(f"  json  → {result['json']}")
+	print(f"  html  → {result['html']}")
+
+	if args.h1:
+		generate_h1_reports(result["json"])
+
+
+def cmd_decode(args):
+	banner("decode")
+	if args.b64e:
+		print(codec.base64_encode(args.b64e))
+	if args.b64d:
+		print(codec.base64_decode(args.b64d))
+	if args.urle:
+		print(codec.url_encode(args.urle))
+	if args.urld:
+		print(codec.url_decode(args.urld))
+	if args.hexe:
+		print(codec.hex_encode(args.hexe))
+	if args.hexd:
+		print(codec.hex_decode(args.hexd))
+	if args.jwt:
+		print(codec.jwt_decode(args.jwt))
+	if args.auto:
+		results = codec.auto_decode(args.auto)
+		if results:
+			for method, decoded in results:
+				print(f"  [{method}] {decoded}")
+		else:
+			print("  [*] no decodings found")
+
+
+def cmd_analyze(args):
+	banner("analyze")
+	LogAnalyzer.analyze_and_print(args.logfile)
+
+
+def cmd_report(args):
+	banner("report")
+	generate_h1_reports(args.json_file)
+
+
+def cmd_ingest(args):
+	banner("ingest")
+	with open(args.tymbal_file, "r") as f:
+		data = json.load(f)
+	result = ScanResult.from_json(data)
+	print(f"  target: {result.target}")
+	print(f"  {result.summary()}")
+	print(f"\n  tymbal data loaded — run scan with --tymbal {args.tymbal_file}")
+
+
+def cmd_check(args):
+	banner("check")
+	missing, status = Config.check_ready()
+	pinfo = Config.platform_info()
+	print(f"  platform: {pinfo['system']} {pinfo['machine']}")
+	print(f"  python:   {pinfo['python']}")
+	print()
+	for name, info in status.items():
+		mark = "✓" if info["available"] else "✗"
+		req = "required" if info["required"] else "optional"
+		print(f"  [{mark}] {name:15} {req:10} {info['path'] or info['install']}")
+	if missing:
+		print(f"\n  [!] {len(missing)} required tools missing")
+	else:
+		print(f"\n  [✓] all required tools installed")
+
+
+def generate_h1_reports(json_path):
+	with open(json_path, "r") as f:
+		result = ScanResult.from_json(json.load(f))
+
+	reports = H1Template.generate_batch(result.findings)
+	if not reports:
+		print("  [*] no actionable findings for h1 reports")
+		return
+
+	out_dir = os.path.dirname(json_path)
+	for i, r in enumerate(reports):
+		path = os.path.join(out_dir, f"h1_report_{i+1}_{r['finding'].finding_id}.md")
+		with open(path, "w") as f:
+			f.write(r["report"])
+		print(f"  h1 report → {path}")
+
+
+def load_scope(scope_file):
+	targets = []
+	with open(scope_file, "r") as f:
+		content = f.read().strip()
+
+	try:
+		data = json.loads(content)
+		if isinstance(data, list):
+			for item in data:
+				if isinstance(item, dict):
+					targets.append(item.get("asset_identifier", item.get("target", "")))
+				elif isinstance(item, str):
+					targets.append(item)
+		elif isinstance(data, dict):
+			for item in data.get("targets", data.get("scope", data.get("assets", []))):
+				if isinstance(item, dict):
+					targets.append(item.get("asset_identifier", item.get("target", "")))
+				elif isinstance(item, str):
+					targets.append(item)
+	except json.JSONDecodeError:
+		for line in content.splitlines():
+			line = line.strip()
+			if line and not line.startswith("#"):
+				parts = line.split(",")
+				targets.append(parts[0].strip())
+
+	return [t for t in targets if t]
+
+
+def interactive_mode():
+	banner("interactive")
+	target = input("  target: ").strip()
+	if not target:
+		print("  [!] target required")
+		sys.exit(1)
+
+	level = input("  mode (fast/normal/deep) [normal]: ").strip().lower() or "normal"
+	if level not in ("fast", "normal", "deep"):
+		level = "normal"
+
+	config = Config(target=target, mode=level)
+	missing, _ = Config.check_ready()
+	if missing:
+		print(f"  [!] missing tools: {', '.join(missing)}")
+		sys.exit(1)
+
+	pipe = Pipeline(config)
+	result = pipe.run()
+	print(f"\n  {'─' * 40}")
+	print(f"  {result['summary']}")
+	print(f"  json → {result['json']}")
+	print(f"  html → {result['html']}")
+
 
 def main():
-	args = parse_args()
-	mode_label = determine_mode_label(args)
-	utils.banner(mode_label)
+	parser = argparse.ArgumentParser(
+		prog="cicada",
+		description="",
+		usage=argparse.SUPPRESS,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+	)
+	sub = parser.add_subparsers(dest="command")
 
-	r_decoders(args)
-	r_logdecoders(args)
+	## scan
+	p_scan = sub.add_parser("scan", help="run recon → probe → report pipeline")
+	p_scan.add_argument("target", help="target domain or url")
+	p_scan.add_argument("-f", "--fast", action="store_true", help="fast mode")
+	p_scan.add_argument("-d", "--deep", action="store_true", help="deep mode")
+	p_scan.add_argument("-w", "--wordlist", help="path to wordlist")
+	p_scan.add_argument("-o", "--output", help="output directory")
+	p_scan.add_argument("-t", "--threads", type=int, default=25, help="thread count")
+	p_scan.add_argument("-s", "--scope", help="scope file (json/csv/txt)")
+	p_scan.add_argument("--templates", help="nuclei template path")
+	p_scan.add_argument("--severity", help="nuclei severity filter")
+	p_scan.add_argument("--tymbal", help="ingest tymbal json before scanning")
+	p_scan.add_argument("--h1", action="store_true", help="generate h1 report templates")
+	p_scan.add_argument("-v", "--verbose", action="store_true")
 
-	selected = []
+	## decode
+	p_dec = sub.add_parser("decode", help="encode/decode strings")
+	p_dec.add_argument("--b64e", help="base64 encode")
+	p_dec.add_argument("--b64d", help="base64 decode")
+	p_dec.add_argument("--urle", help="url encode")
+	p_dec.add_argument("--urld", help="url decode")
+	p_dec.add_argument("--hexe", help="hex encode")
+	p_dec.add_argument("--hexd", help="hex decode")
+	p_dec.add_argument("--jwt", help="decode jwt token")
+	p_dec.add_argument("--auto", help="try all decodings")
 
-	if not any(vars(args).values()):
-		print("[*] No options provided. Entering interactive mode.")
-		args.target = input("Target URL/IP: ").strip()
-		level = input("Scan level (fast/normal/deep): ").strip().lower()
-		if level == "fast":
-			args.fast = True
-		elif level == "normal":
-			args.normal = True
-		elif level == "deep":
-			args.deep = True
+	## analyze
+	p_log = sub.add_parser("analyze", help="decode encoded content from log")
+	p_log.add_argument("logfile", help="path to log file")
 
-	if args.proxy:
-		selected.append('proxy')
-	if args.crawl:
-		selected.append('crawler')
-	if args.collab:
-		selected.append('collaborator')
+	## report
+	p_rpt = sub.add_parser("report", help="generate h1 reports from scan json")
+	p_rpt.add_argument("json_file", help="cicada scan result json")
 
-	if args.deep:
-		selected = ['scanner', 'fuzzer', 'analyze', 'decode', 'proxy', 'crawler', 'collaborator']
-	elif args.fast:
-		selected = ['scanner', 'fuzzer']
-	elif args.normal or not any ([args.scan, args.fuzz, args.deep, args.fast]):
-		selected = ['scanner', 'fuzzer', 'decode', 'crawler']
-	else:
-		if args.scan:
-			selected.append('scanner')
-		if args.fuzz:
-			selected.append('fuzzer')
+	## ingest
+	p_ing = sub.add_parser("ingest", help="preview tymbal recon data")
+	p_ing.add_argument("tymbal_file", help="tymbal output json")
 
-	if args.target and selected:
-		print(f"[*] Running tools: {', '.join(selected)}")
+	## check
+	sub.add_parser("check", help="verify tool installation")
 
-		if 'scanner' in selected:
-			r_scanner(args.target)
-		if 'fuzzer' in selected:
-			r_fuzzer(args.target, args.wordlist)
-		if 'analyze' in selected:
-			log = f"{extract_log_basename(args.target)}.log"
-			analyzer.analyze(log)
-		if 'proxy' in selected:
-			r_proxy()
-		if 'crawler' in selected:
-			r_crawler(args.target)
-		if 'collaborator' in selected:
-			r_collaborator(args.target)
-		if 'decode' in selected:
-			log = f"{extract_log_basename(args.target)}.log"
-			analyzer.decode_all_from_log(log)
+	args = parser.parse_args()
 
-	elif not args.target and any(tool in selected for tool in ['scanner', 'fuzzer']):
-		print("[-] Target is required for scan/fuzz modes.")
+	if not args.command:
+		if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+			args.target = sys.argv[1]
+			args.fast = "-f" in sys.argv or "--fast" in sys.argv
+			args.deep = "-d" in sys.argv or "--deep" in sys.argv
+			args.wordlist = None
+			args.threads = 25
+			args.output = None
+			args.scope = None
+			args.templates = None
+			args.severity = None
+			args.tymbal = None
+			args.h1 = False
+			args.verbose = False
+			cmd_scan(args)
+		else:
+			interactive_mode()
+		return
+
+	commands = {
+		"scan": cmd_scan,
+		"decode": cmd_decode,
+		"analyze": cmd_analyze,
+		"report": cmd_report,
+		"ingest": cmd_ingest,
+		"check": cmd_check,
+	}
+	commands[args.command](args)
+
 
 if __name__ == "__main__":
 	main()
