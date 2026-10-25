@@ -1,57 +1,15 @@
-# Bytecode
-__pycache__/
-*.py[cod]
-*.pyo
+# Compiled binary
+/cicada
+/cicada.exe
 
-# Logs
-*.log
-logs/
+# Go build/test artifacts
+*.test
 *.out
-*.err
-*.log
-*.html
-!report/generator.py
+coverage.*
 
-# Python environment
-env/
-venv/
-ENV/
-.venv/
-.Python
-pip-log.txt
-.env
-dist/
-build/
-*.egg-info/
+# Scan/report output (local runs — don't commit)
+*.cicada.json
+*.cicada.html
 
-# macOS system files
+# macOS
 .DS_Store
-
-# VSCode project files
-.vscode/
-
-# Temporary files
-*.swp
-*~
-*.tmp
-
-# Docker artifacts
-*.tar
-*.img
-*.container
-
-# Coverage / testing
-.coverage
-.tox/
-.cache/
-.pytest_cache/
-/backup/
-
-# Output from tools (if saved)
-*.json
-*.xml
-
-# Project-specific
-tools/
-nuclei/
-ffuf/
